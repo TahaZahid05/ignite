@@ -15,7 +15,9 @@ class DemographicParityDifference(_BaseFairness):
     two subgroups.
 
     A lower value indicates that the model predicts the positive outcome at roughly the same rate
-    across all subgroups, a standard definition of fairness.
+    across all subgroups, a standard definition of fairness. This metric is referred to as
+    *Group Fairness / Statistical Parity* in the fairness literature
+    (`Verma & Rubin, 2018 <https://fairware.cs.umass.edu/papers/Verma.pdf>`_).
 
     - ``update`` must receive output of the form ``(y_pred, y, group_labels)`` or
       ``{'y_pred': y_pred, 'y': y, 'group_labels': group_labels}``.

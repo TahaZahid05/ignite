@@ -81,10 +81,11 @@ def test_multilabel_validation() -> None:
     y = torch.tensor([[1, 0], [1, 1], [1, 1], [0, 0]])
     groups = torch.tensor([0, 0, 1, 1])
     metric.update((y_pred, y, groups))
-    # Group 0: 4/4 elements correct (1.0)
-    # Group 1: 1/4 elements correct (0.25)
-    # Disparity = 1.0 - 0.25 = 0.75
-    assert metric.compute() == 0.75
+    # Accuracy uses sample-wise correctness: all labels must match per sample.
+    # Group 0 (samples 0,1): [1,0]==[1,0] ✓, [1,1]==[1,1] ✓ -> Accuracy = 2/2 = 1.0
+    # Group 1 (samples 2,3): [0,0]!=[1,1] ✗, [0,1]!=[0,0] ✗ -> Accuracy = 0/2 = 0.0
+    # Disparity = 1.0 - 0.0 = 1.0
+    assert metric.compute() == 1.0
 
     metric.reset()
 

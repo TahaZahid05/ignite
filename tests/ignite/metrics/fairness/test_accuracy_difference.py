@@ -79,14 +79,15 @@ def test_subgroup_accuracy_difference_multilabel() -> None:
     metric = SubgroupAccuracyDifference(is_multilabel=True)
 
     # y_pred and y are (B, C)
-    # Group 0: 2/2 elements correct (1.0)
-    # Group 1: 1/2 elements correct (0.5)
+    # Accuracy uses sample-wise correctness: all labels must match per sample.
+    # Group 0 (sample 0): y_pred=[1,0], y=[1,0] -> all match -> correct. Accuracy = 1/1 = 1.0
+    # Group 1 (sample 1): y_pred=[1,1], y=[1,0] -> not all match -> incorrect. Accuracy = 0/1 = 0.0
     y_pred = torch.tensor([[1, 0], [1, 1]])
     y = torch.tensor([[1, 0], [1, 0]])
     groups = torch.tensor([0, 1])
 
     metric.update((y_pred, y, groups))
-    assert_close(metric.compute(), 0.5)
+    assert_close(metric.compute(), 1.0)
 
 
 def test_subgroup_accuracy_difference_spatial() -> None:

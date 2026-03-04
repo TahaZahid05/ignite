@@ -1,5 +1,6 @@
 import torch
 from typing import Callable
+from ignite.metrics.accuracy import Accuracy
 from ignite.metrics.fairness.base import _BaseFairness
 
 __all__ = ["SubgroupAccuracyDifference"]
@@ -11,6 +12,9 @@ class SubgroupAccuracyDifference(_BaseFairness):
     This metric computes the accuracy for each unique subgroup in the dataset and returns
     the maximum difference in accuracy between any two subgroups. It is a strict measure
     of how disparate the performance of a model is across different categorical segments.
+
+    This metric is referred to as *Overall Accuracy Equality* in the fairness literature
+    (`Verma & Rubin, 2018 <https://fairware.cs.umass.edu/papers/Verma.pdf>`_).
 
     - ``update`` must receive output of the form ``(y_pred, y, group_labels)`` or
       ``{'y_pred': y_pred, 'y': y, 'group_labels': group_labels}``.
@@ -83,19 +87,8 @@ class SubgroupAccuracyDifference(_BaseFairness):
         Returns:
             The computed accuracy for the subgroup.
         """
-        if self._type == "binary":
-            correct = torch.eq(y_pred.view(-1).to(y), y.view(-1))
-        elif self._type == "multiclass":
-            indices = torch.argmax(y_pred, dim=1)
-            correct = torch.eq(indices, y).view(-1)
-        elif self._type == "multilabel":
-            # Multilabel: Each label for each example is treated as a separate task to provide
-            # a granular view of disparities across individual classification boundaries.
-            correct = torch.eq(y_pred.type_as(y), y)
-        else:
-            raise ValueError(f"Unexpected type: {self._type}")
-
-        correct_sum = torch.sum(correct).item()
-        total = correct.numel()
-
-        return float(correct_sum) / total if total > 0 else 0.0
+        acc = Accuracy(is_multilabel=self._is_multilabel, device=self._device)
+        acc._type = self._type
+        acc._num_classes = self._num_classes
+        acc.update((y_pred, y))
+        return acc.compute()
