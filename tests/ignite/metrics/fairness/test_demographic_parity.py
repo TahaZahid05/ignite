@@ -10,14 +10,14 @@ from ignite.metrics.fairness.demographic_parity import DemographicParityDifferen
 
 def test_demographic_parity_difference_empty() -> None:
     """Tests if NotComputableError is raised when no data is provided."""
-    metric = DemographicParityDifference()
+    metric = DemographicParityDifference(groups=[0, 1])
     with pytest.raises(NotComputableError, match="Fairness metrics must have at least one example"):
         metric.compute()
 
 
 def test_demographic_parity_difference_single_group() -> None:
     """Tests if NotComputableError is raised when only one subgroup is present."""
-    metric = DemographicParityDifference()
+    metric = DemographicParityDifference(groups=[0])
     y_pred = torch.tensor([[0.9, 0.1], [0.8, 0.2]])
     y = torch.tensor([0, 0])
     group_labels = torch.tensor([0, 0])
@@ -28,7 +28,7 @@ def test_demographic_parity_difference_single_group() -> None:
 
 def test_demographic_parity_difference_binary_probs_shape_B() -> None:
     """Tests DemographicParityDifference with shape (B,) thresholded inputs."""
-    metric = DemographicParityDifference()
+    metric = DemographicParityDifference(groups=[0, 1])
     # y_pred is (B,) already thresholded
     # Group 0: 1 pos / 2 total = 0.5
     # Group 1: 0 pos / 2 total = 0.0
@@ -42,7 +42,7 @@ def test_demographic_parity_difference_binary_probs_shape_B() -> None:
 
 def test_demographic_parity_difference_binary_probs_shape_B_1() -> None:
     """Tests DemographicParityDifference with shape (B, 1) thresholded inputs."""
-    metric = DemographicParityDifference()
+    metric = DemographicParityDifference(groups=[0, 1])
     # y_pred is (B, 1) already thresholded
     y_pred = torch.tensor([[1], [0], [1], [0]])
     y = torch.tensor([0, 0, 0, 0])
@@ -54,7 +54,7 @@ def test_demographic_parity_difference_binary_probs_shape_B_1() -> None:
 
 def test_demographic_parity_difference_multiclass() -> None:
     """Tests DemographicParityDifference with multiclass logits."""
-    metric = DemographicParityDifference()
+    metric = DemographicParityDifference(groups=[0, 1])
     # y_pred is (B, C)
     # G0 selection rates: [0.5, 0.5, 0.0]
     # G1 selection rates: [0.5, 0.0, 0.5]
@@ -76,7 +76,7 @@ def test_demographic_parity_difference_multiclass() -> None:
 
 def test_demographic_parity_difference_multilabel() -> None:
     """Tests DemographicParityDifference with multilabel data."""
-    metric = DemographicParityDifference(is_multilabel=True)
+    metric = DemographicParityDifference(groups=[0, 1], is_multilabel=True)
     # y_pred is (B, C) indicators
     # G0: [1, 1, 0], [0, 0, 0] -> rates: [0.5, 0.5, 0.0]
     # G1: [1, 1, 1], [0, 1, 0] -> rates: [0.5, 1.0, 0.5]
@@ -92,7 +92,7 @@ def test_demographic_parity_difference_multilabel() -> None:
 def _test_distrib_integration(device: torch.device) -> None:
     """Helper to test distributed integration."""
     rank = idist.get_rank()
-    metric = DemographicParityDifference(device=device)
+    metric = DemographicParityDifference(groups=[0, 1], device=device)
     y = torch.tensor([0, 0], device=device)
     groups = torch.tensor([0, 1], device=device)
 

@@ -1,6 +1,6 @@
 import torch
 from abc import abstractmethod
-from typing import Callable, cast
+from typing import Callable, Sequence, cast
 
 import ignite.distributed as idist
 from ignite.exceptions import NotComputableError
@@ -32,10 +32,12 @@ class _BaseFairness(Metric):
 
     def __init__(
         self,
+        groups: Sequence[int],
         output_transform: Callable = lambda x: x,
         device: str | torch.device = torch.device("cpu"),
         requires_y: bool = True,
     ) -> None:
+        self._user_groups = list(groups)
         self._requires_y = requires_y
         self._type: str | None = None
         self._num_classes: int | None = None
@@ -44,11 +46,11 @@ class _BaseFairness(Metric):
     @reinit__is_reduced
     def reset(self) -> None:
         """Resets the metric state."""
-        self._y_preds: list[torch.Tensor] = []
-        self._ys: list[torch.Tensor] = []
-        self._groups: list[torch.Tensor] = []
         self._type = None
         self._num_classes = None
+        self._updated = False
+        self._group_numerator: dict[int, torch.Tensor] = {}
+        self._group_denominator: dict[int, int] = {g: 0 for g in self._user_groups}
 
     def _check_shape(self, y_pred: torch.Tensor, y: torch.Tensor) -> None:
         """Internal method to check the compatibility of y_pred and y shapes.
@@ -151,33 +153,68 @@ class _BaseFairness(Metric):
 
         self._check_shape(y_pred, y)
         self._check_type(y_pred, y)
+        self._updated = True
 
-        self._y_preds.append(y_pred.cpu())
-        if self._requires_y:
-            self._ys.append(y.cpu())
-        self._groups.append(group_labels.view(-1).cpu())
+        for g in self._user_groups:
+            mask = group_labels == g
+            if mask.any():
+                group_y_pred = y_pred[mask]
+                group_y = y[mask] if self._requires_y else y
+                self._update_group(g, group_y_pred, group_y)
 
     @abstractmethod
-    def compute_metric_for_group(self, y_pred: torch.Tensor, y: torch.Tensor) -> float | torch.Tensor:
-        """Computes the core metric (e.g., accuracy, selection rate) for a single specific subgroup.
+    def _update_group(self, group: int, y_pred: torch.Tensor, y: torch.Tensor) -> None:
+        """Update ``self._group_numerator[group]`` and ``self._group_denominator[group]``.
 
-        Subclasses must implement this method.
+        Subclasses must implement this method to define how per-group running
+        accumulators are updated from a batch of data.
 
         Args:
-            y_pred: Predictions for the specific subgroup.
-            y: Targets for the specific subgroup.
-
-        Returns:
-            The computed metric value for the subgroup.
+            group: the group label.
+            y_pred: predictions for this group in the current batch.
+            y: targets for this group in the current batch.
         """
 
-    def _compute_group_disparities(self, y_preds: torch.Tensor, ys: torch.Tensor, groups: torch.Tensor) -> float:
-        """Helper to break the consolidated tensors into group-specific calculations.
+    def _compute_group_metric(self, group: int) -> float | torch.Tensor:
+        """Computes the metric for a group as ``numerator / denominator``.
 
         Args:
-            y_preds: predictions for all groups.
-            ys: targets for all groups.
-            groups: group labels for all predictions and targets.
+            group: the group label.
+
+        Returns:
+            The computed metric value for the group.
+        """
+        if self._group_denominator[group] == 0 or group not in self._group_numerator:
+            for other_g in self._user_groups:
+                if other_g in self._group_numerator:
+                    return torch.zeros_like(self._group_numerator[other_g])
+            return torch.tensor(0.0)
+        return self._group_numerator[group] / self._group_denominator[group]
+
+    def _sync_group_state(self) -> None:
+        """Syncs per-group accumulated state across distributed ranks via all-reduce."""
+        shape = None
+        for g in self._user_groups:
+            if g in self._group_numerator:
+                shape = self._group_numerator[g].shape
+                break
+        if shape is None:
+            return
+        for g in self._user_groups:
+            if g not in self._group_numerator:
+                self._group_numerator[g] = torch.zeros(shape, device=self._device)
+        nums = torch.stack([self._group_numerator[g] for g in self._user_groups])
+        dens = torch.tensor(
+            [self._group_denominator[g] for g in self._user_groups], device=self._device, dtype=torch.float
+        )
+        nums = cast(torch.Tensor, idist.all_reduce(nums))
+        dens = cast(torch.Tensor, idist.all_reduce(dens))
+        for i, g in enumerate(self._user_groups):
+            self._group_numerator[g] = nums[i]
+            self._group_denominator[g] = int(dens[i].item())
+
+    def compute(self) -> float:
+        """Computes the maximum disparity of the metric between any two subgroups.
 
         Returns:
             The maximum difference in metric value between any two subgroups.
@@ -185,53 +222,23 @@ class _BaseFairness(Metric):
         Raises:
             NotComputableError: if less than two unique subgroups have been processed.
         """
-        unique_groups = torch.unique(groups)
-
-        if unique_groups.numel() < 2:
-            raise NotComputableError("Fairness metrics require at least two unique subgroups to compute a disparity.")
-
-        group_metrics = []
-        for g in unique_groups:
-            mask = groups == g
-            group_y_pred = y_preds[mask]
-            group_y = ys[mask] if self._requires_y else ys
-
-            val = self.compute_metric_for_group(group_y_pred, group_y)
-            group_metrics.append(val)
-
-        diff = max(group_metrics) - min(group_metrics)
-        if isinstance(diff, torch.Tensor):
-            return float(diff.item())
-        return float(diff)
-
-    def compute(self) -> float:
-        """Computes the maximum disparity of the metric between any two subgroups.
-
-        Returns:
-            The maximum difference.
-
-        Raises:
-            NotComputableError: if the metric has not seen any data.
-        """
-        if len(self._y_preds) == 0:
+        if not self._updated:
             raise NotComputableError("Fairness metrics must have at least one example before it can be computed.")
 
-        # Concatenate local data
-        all_y_preds = torch.cat(self._y_preds)
-        all_ys = torch.cat(self._ys) if self._requires_y else torch.empty(0)
-        all_groups = torch.cat(self._groups)
+        if len(self._user_groups) < 2:
+            raise NotComputableError("Fairness metrics require at least two unique subgroups to compute a disparity.")
 
         ws = idist.get_world_size()
         if ws > 1:
-            # Sync all data across ranks. We gather tensors from all ranks.
-            all_y_preds = cast(torch.Tensor, idist.all_gather(all_y_preds))
-            all_groups = cast(torch.Tensor, idist.all_gather(all_groups))
-            if self._requires_y:
-                all_ys = cast(torch.Tensor, idist.all_gather(all_ys))
+            self._sync_group_state()
 
-        # Move back to target device for the final computation
-        all_y_preds = all_y_preds.to(self._device)
-        all_ys = all_ys.to(self._device) if self._requires_y else all_ys.to(self._device)
-        all_groups = all_groups.to(self._device)
+        group_metrics = []
+        for g in self._user_groups:
+            val = self._compute_group_metric(g)
+            if isinstance(val, (int, float)):
+                val = torch.tensor(val)
+            group_metrics.append(val)
 
-        return self._compute_group_disparities(all_y_preds, all_ys, all_groups)
+        stacked = torch.stack(group_metrics)
+        disparities = stacked.max(dim=0).values - stacked.min(dim=0).values
+        return float(disparities.max().item())

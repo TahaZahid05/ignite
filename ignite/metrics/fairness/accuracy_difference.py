@@ -1,5 +1,5 @@
 import torch
-from typing import Callable
+from typing import Callable, Sequence
 from ignite.metrics.accuracy import Accuracy
 from ignite.metrics.fairness.base import _BaseFairness
 
@@ -41,7 +41,7 @@ class SubgroupAccuracyDifference(_BaseFairness):
 
         .. testcode::
 
-            metric = SubgroupAccuracyDifference()
+            metric = SubgroupAccuracyDifference(groups=[0, 1])
             metric.attach(default_evaluator, 'subgroup_acc_diff')
 
             # Predictions for 4 items:
@@ -70,25 +70,22 @@ class SubgroupAccuracyDifference(_BaseFairness):
 
     def __init__(
         self,
+        groups: Sequence[int],
         is_multilabel: bool = False,
         output_transform: Callable = lambda x: x,
         device: torch.device | str = torch.device("cpu"),
     ) -> None:
         self._is_multilabel = is_multilabel
-        super().__init__(output_transform=output_transform, device=device)
+        super().__init__(groups=groups, output_transform=output_transform, device=device)
+        self.acc = Accuracy(is_multilabel=is_multilabel, device=device)
 
-    def compute_metric_for_group(self, y_pred: torch.Tensor, y: torch.Tensor) -> float:
-        """Computes the accuracy for a specific subgroup.
-
-        Args:
-            y_pred: predictions for the specific subgroup.
-            y: targets for the specific subgroup.
-
-        Returns:
-            The computed accuracy for the subgroup.
-        """
-        acc = Accuracy(is_multilabel=self._is_multilabel, device=self._device)
-        acc._type = self._type
-        acc._num_classes = self._num_classes
-        acc.update((y_pred, y))
-        return acc.compute()
+    def _update_group(self, group: int, y_pred: torch.Tensor, y: torch.Tensor) -> None:
+        """Updates per-group accuracy accumulators by reusing :class:`~ignite.metrics.Accuracy`."""
+        self.acc.reset()
+        self.acc._type = self._type
+        self.acc._num_classes = self._num_classes
+        self.acc.update((y_pred, y))
+        if group not in self._group_numerator:
+            self._group_numerator[group] = torch.tensor(0.0, device=self._device)
+        self._group_numerator[group] += self.acc._num_correct.float()
+        self._group_denominator[group] += self.acc._num_examples

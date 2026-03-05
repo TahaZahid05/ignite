@@ -5,7 +5,7 @@ from ignite.metrics.fairness import SubgroupAccuracyDifference, DemographicParit
 
 def test_subgroup_accuracy_difference_validation() -> None:
     """Tests input validation for SubgroupAccuracyDifference."""
-    metric = SubgroupAccuracyDifference()
+    metric = SubgroupAccuracyDifference(groups=[0, 1])
 
     # Valid multiclass logits
     y_pred = torch.randn(4, 3)
@@ -35,7 +35,7 @@ def test_subgroup_accuracy_difference_validation() -> None:
 
 def test_demographic_parity_difference_validation() -> None:
     """Tests input validation for DemographicParityDifference."""
-    metric = DemographicParityDifference()
+    metric = DemographicParityDifference(groups=[0, 1])
 
     # Valid multiclass logits
     y_pred = torch.tensor(
@@ -74,7 +74,7 @@ def test_demographic_parity_difference_validation() -> None:
 
 def test_multilabel_validation() -> None:
     """Tests input validation for multilabel data."""
-    metric = SubgroupAccuracyDifference(is_multilabel=True)
+    metric = SubgroupAccuracyDifference(groups=[0, 1], is_multilabel=True)
 
     # Valid multilabel (0/1)
     y_pred = torch.tensor([[1, 0], [1, 1], [0, 0], [0, 1]])
@@ -99,7 +99,7 @@ def test_multilabel_validation() -> None:
 
 def test_shape_mismatch_validation() -> None:
     """Tests validation for shape mismatches between y and y_pred."""
-    metric = SubgroupAccuracyDifference()
+    metric = SubgroupAccuracyDifference(groups=[0, 1])
 
     # y is (B,), y_pred is (B, C) - OK
     metric.update((torch.randn(4, 3), torch.randint(0, 3, (4,)), torch.zeros(4)))
@@ -111,7 +111,7 @@ def test_shape_mismatch_validation() -> None:
 
 def test_batch_size_mismatch_validation() -> None:
     """Tests validation for batch size mismatches across y_pred, y, and groups."""
-    metric = SubgroupAccuracyDifference()
+    metric = SubgroupAccuracyDifference(groups=[0, 1])
 
     # y_pred (4), y (3) - Batch size mismatch
     with pytest.raises(ValueError, match="y_pred, y, and group_labels must have the same batch size"):
@@ -124,7 +124,7 @@ def test_batch_size_mismatch_validation() -> None:
 
 def test_type_switch_validation() -> None:
     """Tests if RuntimeError is raised when input type changes mid-epoch."""
-    metric = SubgroupAccuracyDifference()
+    metric = SubgroupAccuracyDifference(groups=[0, 1])
 
     # First batch: binary
     metric.update((torch.tensor([1, 0]), torch.tensor([1, 0]), torch.tensor([0, 1])))
