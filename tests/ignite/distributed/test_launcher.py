@@ -48,11 +48,14 @@ def execute(cmd, env=None):
     env = dict(os.environ) if env is None else env
     env["PYTHONPATH"] = f"{os.path.dirname(ignite.__path__[0])}"
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-    process.wait()
+    stdout, stderr = process.communicate()
+    stdout_str = stdout.decode("utf-8", errors="replace") if stdout else ""
+    stderr_str = stderr.decode("utf-8", errors="replace") if stderr else ""
+
     if process.returncode != 0:
-        print(str(process.stdout.read()) + str(process.stderr.read()))
-        raise subprocess.CalledProcessError(returncode=process.returncode, cmd=cmd, stderr=process.stderr.read())
-    return str(process.stdout.read()) + str(process.stderr.read())
+        print(stdout_str + stderr_str)
+        raise subprocess.CalledProcessError(returncode=process.returncode, cmd=cmd, stderr=stderr_str)
+    return stdout_str + stderr_str
 
 
 @pytest.mark.skipif(not is_mps_available_and_functional(), reason="Skip if MPS not functional")
