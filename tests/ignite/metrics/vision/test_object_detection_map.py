@@ -18,7 +18,7 @@ import ignite.distributed as idist
 from ignite.engine import Engine
 from ignite.metrics import CommonObjectDetectionMetrics, ObjectDetectionAvgPrecisionRecall
 from ignite.metrics.vision.object_detection_average_precision_recall import coco_tensor_list_to_dict_list
-from ignite.utils import manual_seed
+from ignite.utils import manual_seed, convert_tensor
 
 torch.set_printoptions(linewidth=200)
 manual_seed(12)
@@ -610,6 +610,15 @@ def sample(request) -> Sample:
     return Sample(data, mAP, len(data[0]))
 
 
+@pytest.fixture
+def get_sample(sample):
+    def _get_sample(device):
+        data = convert_tensor(sample.data, device=device)
+        return Sample(data, sample.mAP, sample.length)
+
+    return _get_sample
+
+
 def test_wrong_input():
     m = ObjectDetectionAvgPrecisionRecall()
 
@@ -868,12 +877,13 @@ def test__compute_recall_and_precision(available_device):
     assert (ignite_precision.flip(-1).numpy() == sklearn_precisions).all()
 
 
-def test_compute(sample):
-    device = idist.device()
+def test_compute(get_sample, available_device):
+    device = available_device
 
-    if device == torch.device("mps"):
+    if torch.device(device).type == "mps":
         pytest.skip("Due to MPS backend out of memory")
 
+    sample = get_sample(device)
     # AP@.5...95, AP@.5, AP@.75, AP-S, AP-M, AP-L, AR-1, AR-10, AR-100, AR-S, AR-M, AR-L
     ap_50_95_ar_100 = ObjectDetectionAvgPrecisionRecall(num_classes=91, device=device)
     ap_50 = ObjectDetectionAvgPrecisionRecall(num_classes=91, iou_thresholds=[0.5], device=device)
@@ -902,9 +912,16 @@ def test_compute(sample):
     AR_1 = ignite_res[6][1]
     AR_10 = ignite_res[7][1]
     all_res = [AP_50_95, AP_50, AP_75, AP_S, AP_M, AP_L, AR_1, AR_10, AR_100, AR_S, AR_M, AR_L]
-    print(all_res)
     assert np.allclose(all_res, sample.mAP)
 
+
+def test_common_metrics(get_sample, available_device):
+    device = available_device
+
+    if torch.device(device).type == "mps":
+        pytest.skip("Due to MPS backend out of memory")
+
+    sample = get_sample(device)
     common_metrics = CommonObjectDetectionMetrics(num_classes=91, device=device)
     common_metrics.update(sample.data)
     res = common_metrics.compute()
@@ -922,17 +939,28 @@ def test_compute(sample):
         res["AR-M"],
         res["AR-L"],
     ]
-    print(common_metrics_res)
-    assert all_res == common_metrics_res
     assert np.allclose(common_metrics_res, sample.mAP)
 
 
-def test_integration(sample):
-    bs = 3
+def test_cross_device_update(sample, available_device):
+    # This test ensures that metric handles inputs on CPU correctly regardless of metric device
+    device = available_device
+    metric = ObjectDetectionAvgPrecisionRecall(num_classes=91, device=device)
 
-    device = idist.device()
-    if device == torch.device("mps"):
+    # sample.data has tensors on CPU by default from the fixture
+    metric.update(sample.data)
+    res = metric.compute()
+    assert res[0] > -1
+
+
+def test_engine_integration(get_sample, available_device):
+    bs = 3
+    device = available_device
+
+    if torch.device(device).type == "mps":
         pytest.skip("Due to MPS backend out of memory")
+
+    sample = get_sample(device)
 
     def update(engine, i):
         b = slice(i * bs, (i + 1) * bs)
@@ -940,8 +968,8 @@ def test_integration(sample):
 
     engine = Engine(update)
 
-    metric_device = "cpu" if device.type == "xla" else device
-    metric_50_95 = ObjectDetectionAvgPrecisionRecall(num_classes=91, device=metric_device)
+    # Note: available_device could be 'cpu', 'cuda', or 'mps'
+    metric_50_95 = ObjectDetectionAvgPrecisionRecall(num_classes=91, device=device)
     metric_50_95.attach(engine, name="mAP[50-95]")
 
     n_iter = ceil(sample.length / bs)

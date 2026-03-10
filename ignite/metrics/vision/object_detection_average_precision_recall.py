@@ -97,6 +97,9 @@ class ObjectDetectionAvgPrecisionRecall(Metric, _BaseAveragePrecision):
                 this.
 
         .. versionadded:: 0.5.2
+        .. versionchanged:: 0.5.4
+            Ensured internal tensors are handled on the specified ``device`` and added automatic device
+            conversion for input tensors in ``update``.
         """
         try:
             from torchvision.ops.boxes import _box_inter_union, box_area
@@ -115,8 +118,6 @@ class ObjectDetectionAvgPrecisionRecall(Metric, _BaseAveragePrecision):
         if iou_thresholds is None:
             iou_thresholds = torch.linspace(0.5, 0.95, 10, dtype=torch.double)
 
-        self._iou_thresholds = self._setup_thresholds(iou_thresholds, "iou_thresholds")
-
         if rec_thresholds is None:
             rec_thresholds = torch.linspace(0, 1, 101, dtype=torch.double)
 
@@ -132,9 +133,9 @@ class ObjectDetectionAvgPrecisionRecall(Metric, _BaseAveragePrecision):
         super(Metric, self).__init__(
             rec_thresholds=rec_thresholds,
             class_mean=None,
+            device=device,
         )
-        precision = torch.double if torch.device(device).type != "mps" else torch.float32
-        self.rec_thresholds = cast(torch.Tensor, self.rec_thresholds).to(device=device, dtype=precision)
+        self._iou_thresholds = self._setup_thresholds(iou_thresholds, "iou_thresholds")
 
     @reinit__is_reduced
     def reset(self) -> None:
@@ -218,14 +219,10 @@ class ObjectDetectionAvgPrecisionRecall(Metric, _BaseAveragePrecision):
         """
         indices = torch.argsort(scores, dim=-1, stable=True, descending=True)
         tp = TP[..., indices]
-        tp_summation = tp.cumsum(dim=-1)
-        if tp_summation.device.type != "mps":
-            tp_summation = tp_summation.double()
+        tp_summation = tp.cumsum(dim=-1).to(self._fp_precision)
 
         fp = FP[..., indices]
-        fp_summation = fp.cumsum(dim=-1)
-        if fp_summation.device.type != "mps":
-            fp_summation = fp_summation.double()
+        fp_summation = fp.cumsum(dim=-1).to(self._fp_precision)
 
         recall = tp_summation / y_true_count
         predicted_positive = tp_summation + fp_summation
@@ -301,8 +298,15 @@ class ObjectDetectionAvgPrecisionRecall(Metric, _BaseAveragePrecision):
                                             This key is optional.
                 ========= ================= =================================================
         """
+        from ignite.utils import convert_tensor
+
         self._check_matching_input(output)
-        for pred, target in zip(*output):
+        y_pred, y_true = cast(
+            tuple[list[dict[str, torch.Tensor]], list[dict[str, torch.Tensor]]],
+            convert_tensor(output, device=self._device),
+        )
+
+        for pred, target in zip(y_pred, y_true):
             labels = target["labels"]
             gt_boxes = target["bbox"]
             gt_is_crowd = (
