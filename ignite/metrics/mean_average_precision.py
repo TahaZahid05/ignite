@@ -222,9 +222,6 @@ class MeanAveragePrecision(_BaseClassification, _BaseAveragePrecision):
                 this.
 
         .. versionadded:: 0.5.2
-        .. versionchanged:: 0.5.4
-            Ensured internal tensors are handled on the specified ``device`` and added automatic device
-            conversion for input tensors in ``update``.
         """
 
         super(MeanAveragePrecision, self).__init__(
@@ -317,7 +314,7 @@ class MeanAveragePrecision(_BaseClassification, _BaseAveragePrecision):
         self._check_shape(output)
         self._check_type(output)
         yp, yt = self._prepare_output(output)
-        self._y_pred.append(yp.to(self._device))
+        self._y_pred.append(yp.to(self._device, dtype=self._fp_precision))
         self._y_true.append(yt.to(self._device, dtype=torch.uint8 if self._type != "multiclass" else torch.long))
 
     def _compute_recall_and_precision(

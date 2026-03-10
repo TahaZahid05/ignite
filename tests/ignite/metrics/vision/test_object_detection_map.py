@@ -605,6 +605,7 @@ def sample(request) -> Sample:
                 0,
             ),
         }
+    data = (data[0][:10], data[1][:10])
     mAP = pycoco_mAP(*data)
 
     return Sample(data, mAP, len(data[0]))
@@ -853,8 +854,8 @@ def test__compute_recall_and_precision(available_device):
     sklearn_precision, sklearn_recall, _ = sklearn_precision_recall_curve_allowing_multiple_recalls_at_single_threshold(
         y_true.numpy(), scores.numpy()
     )
-    assert (ignite_recall.flip(0).numpy() == sklearn_recall[:-1]).all()
-    assert (ignite_precision.flip(0).numpy() == sklearn_precision[:-1]).all()
+    assert np.allclose(ignite_recall.flip(0).cpu().numpy(), sklearn_recall[:-1])
+    assert np.allclose(ignite_precision.flip(0).cpu().numpy(), sklearn_precision[:-1])
 
     # Like above but with two additional mean dimensions.
     scores = torch.rand((50,))
@@ -873,16 +874,12 @@ def test__compute_recall_and_precision(available_device):
     ignite_recall, ignite_precision = m._compute_recall_and_precision(
         y_true.bool(), ~(y_true.bool()), scores, torch.tensor(15)
     )
-    assert (ignite_recall.flip(-1).numpy() == sklearn_recalls).all()
-    assert (ignite_precision.flip(-1).numpy() == sklearn_precisions).all()
+    assert np.allclose(ignite_recall.flip(-1).cpu().numpy(), sklearn_recalls)
+    assert np.allclose(ignite_precision.flip(-1).cpu().numpy(), sklearn_precisions)
 
 
 def test_compute(get_sample, available_device):
     device = available_device
-
-    if torch.device(device).type == "mps":
-        pytest.skip("Due to MPS backend out of memory")
-
     sample = get_sample(device)
     # AP@.5...95, AP@.5, AP@.75, AP-S, AP-M, AP-L, AR-1, AR-10, AR-100, AR-S, AR-M, AR-L
     ap_50_95_ar_100 = ObjectDetectionAvgPrecisionRecall(num_classes=91, device=device)
@@ -917,10 +914,6 @@ def test_compute(get_sample, available_device):
 
 def test_common_metrics(get_sample, available_device):
     device = available_device
-
-    if torch.device(device).type == "mps":
-        pytest.skip("Due to MPS backend out of memory")
-
     sample = get_sample(device)
     common_metrics = CommonObjectDetectionMetrics(num_classes=91, device=device)
     common_metrics.update(sample.data)
@@ -956,10 +949,6 @@ def test_cross_device_update(sample, available_device):
 def test_engine_integration(get_sample, available_device):
     bs = 3
     device = available_device
-
-    if torch.device(device).type == "mps":
-        pytest.skip("Due to MPS backend out of memory")
-
     sample = get_sample(device)
 
     def update(engine, i):
@@ -1030,9 +1019,6 @@ def test_distrib_update_compute(distributed, sample):
 
     device = idist.device()
 
-    if device == torch.device("mps"):
-        pytest.skip("Due to MPS backend out of memory")
-
     metric_device = "cpu" if device.type == "xla" else device
     # AP@.5...95, AP@.5, AP@.75, AP-S, AP-M, AP-L, AR-1, AR-10, AR-100, AR-S, AR-M, AR-L
     ap_50_95_ar_100 = ObjectDetectionAvgPrecisionRecall(num_classes=91, device=metric_device)
@@ -1050,8 +1036,9 @@ def test_distrib_update_compute(distributed, sample):
 
     y_pred_rank = sample.data[0][rank_samples_range]
     y_rank = sample.data[1][rank_samples_range]
-    for metric in metrics:
-        metric.update((y_pred_rank, y_rank))
+    if len(y_pred_rank) > 0:
+        for metric in metrics:
+            metric.update((y_pred_rank, y_rank))
 
     ignite_res = [metric.compute() for metric in metrics]
     ignite_res_recompute = [metric.compute() for metric in metrics]

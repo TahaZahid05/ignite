@@ -97,9 +97,6 @@ class ObjectDetectionAvgPrecisionRecall(Metric, _BaseAveragePrecision):
                 this.
 
         .. versionadded:: 0.5.2
-        .. versionchanged:: 0.5.4
-            Ensured internal tensors are handled on the specified ``device`` and added automatic device
-            conversion for input tensors in ``update``.
         """
         try:
             from torchvision.ops.boxes import _box_inter_union, box_area
@@ -116,25 +113,17 @@ class ObjectDetectionAvgPrecisionRecall(Metric, _BaseAveragePrecision):
             raise ModuleNotFoundError("This metric requires torchvision to be installed.")
 
         if iou_thresholds is None:
-            iou_thresholds = torch.linspace(0.5, 0.95, 10, dtype=torch.double)
+            iou_thresholds = torch.linspace(0.5, 0.95, 10)
 
         if rec_thresholds is None:
-            rec_thresholds = torch.linspace(0, 1, 101, dtype=torch.double)
+            rec_thresholds = torch.linspace(0, 1, 101)
 
         self._num_classes = num_classes
         self._area_range = area_range
         self._max_detections_per_image_per_class = max_detections_per_image_per_class
 
-        super(ObjectDetectionAvgPrecisionRecall, self).__init__(
-            output_transform=output_transform,
-            device=device,
-            skip_unrolling=skip_unrolling,
-        )
-        super(Metric, self).__init__(
-            rec_thresholds=rec_thresholds,
-            class_mean=None,
-            device=device,
-        )
+        Metric.__init__(self, output_transform=output_transform, device=device, skip_unrolling=skip_unrolling)
+        _BaseAveragePrecision.__init__(self, rec_thresholds=rec_thresholds, class_mean=None, device=device)
         self._iou_thresholds = self._setup_thresholds(iou_thresholds, "iou_thresholds")
 
     @reinit__is_reduced
@@ -366,9 +355,7 @@ class ObjectDetectionAvgPrecisionRecall(Metric, _BaseAveragePrecision):
                     )
 
                 scores = pred["scores"][max_best_detections_index]
-                if self._device.type == "mps" and scores.dtype == torch.double:
-                    scores = scores.to(dtype=torch.float32)
-                self._scores.append(scores.to(self._device))
+                self._scores.append(scores.to(self._device, dtype=self._fp_precision))
                 self._y_pred_labels.append(pred_labels.to(dtype=torch.int, device=self._device))
 
     @sync_all_reduce("_y_true_count")
@@ -376,13 +363,12 @@ class ObjectDetectionAvgPrecisionRecall(Metric, _BaseAveragePrecision):
         pred_labels = _cat_and_agg_tensors(self._y_pred_labels, cast(tuple[int], ()), torch.int, self._device)
         TP = _cat_and_agg_tensors(self._tps, (len(self._iou_thresholds),), torch.uint8, self._device)
         FP = _cat_and_agg_tensors(self._fps, (len(self._iou_thresholds),), torch.uint8, self._device)
-        fp_precision = torch.double if self._device.type != "mps" else torch.float32
-        scores = _cat_and_agg_tensors(self._scores, cast(tuple[int], ()), fp_precision, self._device)
+        scores = _cat_and_agg_tensors(self._scores, cast(tuple[int], ()), self._fp_precision, self._device)
 
         average_precisions_recalls = -torch.ones(
             (2, self._num_classes, len(self._iou_thresholds)),
             device=self._device,
-            dtype=fp_precision,
+            dtype=self._fp_precision,
         )
         for cls in range(self._num_classes):
             if self._y_true_count[cls] == 0:
