@@ -614,7 +614,13 @@ def sample(request) -> Sample:
 @pytest.fixture
 def get_sample(sample):
     def _get_sample(device):
-        data = convert_tensor(sample.data, device=device)
+        from ignite.utils import apply_to_tensor
+
+        data = sample.data
+        if torch.device(device).type == "mps":
+            data = apply_to_tensor(data, lambda x: x.float() if x.is_floating_point() else x)
+        data = convert_tensor(data, device=device)
+
         return Sample(data, sample.mAP, sample.length)
 
     return _get_sample
