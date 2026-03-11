@@ -287,12 +287,17 @@ class ObjectDetectionAvgPrecisionRecall(Metric, _BaseAveragePrecision):
                                             This key is optional.
                 ========= ================= =================================================
         """
-        from ignite.utils import convert_tensor
+        from ignite.utils import apply_to_tensor
+
+        def _func(t):
+            if t.is_floating_point():
+                return t.to(device=self._device, dtype=self._fp_precision)
+            return t.to(device=self._device)
 
         self._check_matching_input(output)
         y_pred, y_true = cast(
             tuple[list[dict[str, torch.Tensor]], list[dict[str, torch.Tensor]]],
-            convert_tensor(output, device=self._device),
+            apply_to_tensor(output, _func),
         )
 
         for pred, target in zip(y_pred, y_true):
