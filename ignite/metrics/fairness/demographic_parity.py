@@ -1,12 +1,85 @@
 import torch
 from typing import Callable, Sequence
 
-from ignite.metrics.fairness.base import _BaseFairness
+from ignite.exceptions import NotComputableError
+from ignite.metrics.accuracy import _BaseClassification
+from ignite.metrics.fairness.base import SubgroupDifference
 
-__all__ = ["DemographicParityDifference"]
+__all__ = ["DemographicParityDifference", "SelectionRate"]
 
 
-class DemographicParityDifference(_BaseFairness):
+class SelectionRate(_BaseClassification):
+    """Calculates the selection rate (rate of positive predictions).
+
+    - ``update`` must receive output of the form ``(y_pred, y)``.
+    - `y_pred` must be in the following shape (batch_size, num_categories, ...) or (batch_size, ...).
+    - `y` must be in the following shape (batch_size, ...).
+
+    Args:
+        output_transform: a callable that is used to transform the engine output.
+        is_multilabel: if True, multilabel selection rate is calculated. By default, False.
+        device: specifies the computation device.
+        skip_unrolling: specifies whether output should be unrolled before being fed to update method.
+    """
+
+    def __init__(
+        self,
+        output_transform: Callable = lambda x: x,
+        is_multilabel: bool = False,
+        device: str | torch.device = torch.device("cpu"),
+        skip_unrolling: bool = False,
+    ):
+        self._num_positives: torch.Tensor | None = None
+        super().__init__(
+            output_transform=output_transform, is_multilabel=is_multilabel, device=device, skip_unrolling=skip_unrolling
+        )
+
+    def reset(self) -> None:
+        self._num_positives: torch.Tensor | None = None
+        self._num_examples = 0
+        super().reset()
+
+    def update(self, output: Sequence[torch.Tensor]) -> None:
+        self._check_shape(output)
+        self._check_type(output)
+        y_pred = output[0].detach()
+
+        if self._type == "binary":
+            positives = torch.bincount(y_pred.view(-1).to(torch.long), minlength=2).float()
+            total = y_pred.numel()
+        elif self._type == "multiclass":
+            if self._num_classes is None:
+                raise RuntimeError("num_classes must be set for multiclass data.")
+            predicted_classes = torch.argmax(y_pred, dim=1)
+            positives = torch.bincount(predicted_classes.view(-1), minlength=self._num_classes).float()
+            total = predicted_classes.numel()
+        elif self._type == "multilabel":
+            if self._num_classes is None:
+                raise RuntimeError("num_classes must be set for multilabel data.")
+            num_classes: int = self._num_classes
+            positives = y_pred.movedim(1, -1).reshape(-1, num_classes).sum(dim=0).float()
+            total = int(y_pred.numel() / num_classes)
+        else:
+            raise ValueError(f"Unexpected type: {self._type}")
+
+        if self._num_positives is None:
+            self._num_positives = positives.to(self._device)
+        else:
+            self._num_positives += positives.to(self._device)
+        self._num_examples += total
+
+    def compute(self) -> torch.Tensor:
+        """Computes the selection rate.
+
+        Returns:
+            The selection rate for each category/label.
+        """
+        if self._num_examples == 0 or self._num_positives is None:
+            raise NotComputableError("SelectionRate must have at least one example before it can be computed.")
+        return self._num_positives / self._num_examples
+
+
+class DemographicParityDifference(SubgroupDifference):
     r"""Calculates the Demographic Parity Difference.
 
     This metric computes the selection rate (the rate of positive predictions) for each unique
@@ -15,8 +88,7 @@ class DemographicParityDifference(_BaseFairness):
 
     A lower value indicates that the model predicts the positive outcome at roughly the same rate
     across all subgroups, a standard definition of fairness. This metric is referred to as
-    *Group Fairness / Statistical Parity* in the fairness literature
-    (`Verma & Rubin, 2018 <https://fairware.cs.umass.edu/papers/Verma.pdf>`_).
+    *Group Fairness / Statistical Parity* in the fairness literature.
 
     - ``update`` must receive output of the form ``(y_pred, y, group_labels)`` or
       ``{'y_pred': y_pred, 'y': y, 'group_labels': group_labels}``.
@@ -25,6 +97,7 @@ class DemographicParityDifference(_BaseFairness):
     - `group_labels` must be a 1D tensor of shape (batch_size,) containing discrete labels.
 
     Args:
+        groups: a sequence of unique group identifiers.
         is_multilabel: if True, multilabel selection rate is calculated. By default, False.
         output_transform: a callable that is used to transform the
             :class:`~ignite.engine.engine.Engine`'s ``process_function``'s output into the
@@ -68,6 +141,10 @@ class DemographicParityDifference(_BaseFairness):
             1.0
 
     .. versionadded:: 0.6.0
+
+    References:
+        - Verma & Rubin, `Fairness Definitions Explained
+          <https://fairware.cs.umass.edu/papers/Verma.pdf>`_, 2018.
     """
 
     def __init__(
@@ -77,33 +154,13 @@ class DemographicParityDifference(_BaseFairness):
         output_transform: Callable = lambda x: x,
         device: torch.device | str = torch.device("cpu"),
     ) -> None:
-        self._is_multilabel = is_multilabel
-        super().__init__(groups=groups, output_transform=output_transform, device=device, requires_y=False)
+        sr = SelectionRate(is_multilabel=is_multilabel, device=device)
+        super().__init__(base_metric=sr, groups=groups, output_transform=output_transform, device=device)
 
-    def _update_group(self, group: int, y_pred: torch.Tensor, y: torch.Tensor) -> None:
-        """Updates per-group selection rate accumulators."""
-        if self._type == "binary":
-            positives = torch.bincount(y_pred.view(-1).to(torch.long), minlength=2).float()
-            total = y_pred.numel()
+    def compute(self) -> float:
+        """Computes the maximum demographic parity difference between any two subgroups.
 
-        elif self._type == "multiclass":
-            if self._num_classes is None:
-                raise RuntimeError("num_classes must be set for multiclass data.")
-            predicted_classes = torch.argmax(y_pred, dim=1)
-            positives = torch.bincount(predicted_classes.view(-1), minlength=self._num_classes).float()
-            total = predicted_classes.numel()
-
-        elif self._type == "multilabel":
-            if self._num_classes is None:
-                raise RuntimeError("num_classes must be set for multilabel data.")
-            num_classes: int = self._num_classes
-            positives = y_pred.movedim(1, -1).reshape(-1, num_classes).sum(dim=0).float()
-            total = int(y_pred.numel() / num_classes)
-
-        else:
-            raise ValueError(f"Unexpected type: {self._type}")
-
-        if group not in self._group_numerator:
-            self._group_numerator[group] = torch.zeros_like(positives, device=self._device)
-        self._group_numerator[group] += positives.to(self._device)
-        self._group_denominator[group] += total
+        Returns:
+            The maximum difference in selection rates across all subgroups.
+        """
+        return super().compute()

@@ -1,20 +1,19 @@
 import torch
 from typing import Callable, Sequence
 from ignite.metrics.accuracy import Accuracy
-from ignite.metrics.fairness.base import _BaseFairness
+from ignite.metrics.fairness.base import SubgroupDifference
 
 __all__ = ["SubgroupAccuracyDifference"]
 
 
-class SubgroupAccuracyDifference(_BaseFairness):
+class SubgroupAccuracyDifference(SubgroupDifference):
     r"""Calculates the Subgroup Accuracy Difference.
 
     This metric computes the accuracy for each unique subgroup in the dataset and returns
     the maximum difference in accuracy between any two subgroups. It is a strict measure
     of how disparate the performance of a model is across different categorical segments.
 
-    This metric is referred to as *Overall Accuracy Equality* in the fairness literature
-    (`Verma & Rubin, 2018 <https://fairware.cs.umass.edu/papers/Verma.pdf>`_).
+    This metric is referred to as *Overall Accuracy Equality* in the fairness literature.
 
     - ``update`` must receive output of the form ``(y_pred, y, group_labels)`` or
       ``{'y_pred': y_pred, 'y': y, 'group_labels': group_labels}``.
@@ -23,6 +22,7 @@ class SubgroupAccuracyDifference(_BaseFairness):
     - `group_labels` must be a 1D tensor of shape (batch_size,) containing discrete labels.
 
     Args:
+        groups: a sequence of unique group identifiers.
         is_multilabel: if True, multilabel accuracy is calculated. By default, False.
         output_transform: a callable that is used to transform the
             :class:`~ignite.engine.engine.Engine`'s ``process_function``'s output into the
@@ -66,6 +66,10 @@ class SubgroupAccuracyDifference(_BaseFairness):
             1.0
 
     .. versionadded:: 0.6.0
+
+    References:
+        - Verma & Rubin, `Fairness Definitions Explained
+          <https://fairware.cs.umass.edu/papers/Verma.pdf>`_, 2018.
     """
 
     def __init__(
@@ -75,17 +79,13 @@ class SubgroupAccuracyDifference(_BaseFairness):
         output_transform: Callable = lambda x: x,
         device: torch.device | str = torch.device("cpu"),
     ) -> None:
-        self._is_multilabel = is_multilabel
-        super().__init__(groups=groups, output_transform=output_transform, device=device)
-        self.acc = Accuracy(is_multilabel=is_multilabel, device=device)
+        acc = Accuracy(is_multilabel=is_multilabel, device=device)
+        super().__init__(base_metric=acc, groups=groups, output_transform=output_transform, device=device)
 
-    def _update_group(self, group: int, y_pred: torch.Tensor, y: torch.Tensor) -> None:
-        """Updates per-group accuracy accumulators by reusing :class:`~ignite.metrics.Accuracy`."""
-        self.acc.reset()
-        self.acc._type = self._type
-        self.acc._num_classes = self._num_classes
-        self.acc.update((y_pred, y))
-        if group not in self._group_numerator:
-            self._group_numerator[group] = torch.tensor(0.0, device=self._device)
-        self._group_numerator[group] += self.acc._num_correct.float()
-        self._group_denominator[group] += self.acc._num_examples
+    def compute(self) -> float:
+        """Computes the maximum accuracy difference between any two subgroups.
+
+        Returns:
+            The maximum difference in accuracy across all subgroups.
+        """
+        return super().compute()
