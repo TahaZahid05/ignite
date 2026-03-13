@@ -7,6 +7,7 @@ from typing_extensions import Literal
 from ignite.metrics import MetricGroup
 from ignite.metrics.mean_average_precision import _BaseAveragePrecision, _cat_and_agg_tensors
 from ignite.metrics.metric import Metric, reinit__is_reduced, sync_all_reduce
+from ignite.utils import apply_to_tensor
 
 
 def coco_tensor_list_to_dict_list(
@@ -287,7 +288,6 @@ class ObjectDetectionAvgPrecisionRecall(Metric, _BaseAveragePrecision):
                                             This key is optional.
                 ========= ================= =================================================
         """
-        from ignite.utils import apply_to_tensor
 
         def _func(t):
             if t.is_floating_point():

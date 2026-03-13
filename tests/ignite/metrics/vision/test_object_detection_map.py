@@ -18,7 +18,7 @@ import ignite.distributed as idist
 from ignite.engine import Engine
 from ignite.metrics import CommonObjectDetectionMetrics, ObjectDetectionAvgPrecisionRecall
 from ignite.metrics.vision.object_detection_average_precision_recall import coco_tensor_list_to_dict_list
-from ignite.utils import manual_seed, convert_tensor
+from ignite.utils import apply_to_tensor, manual_seed
 
 torch.set_printoptions(linewidth=200)
 manual_seed(12)
@@ -614,12 +614,12 @@ def sample(request) -> Sample:
 @pytest.fixture
 def get_sample(sample):
     def _get_sample(device):
-        from ignite.utils import apply_to_tensor
+        def _to_device(t):
+            if t.is_floating_point() and torch.device(device).type == "mps":
+                return t.float().to(device=device)
+            return t.to(device=device)
 
-        data = sample.data
-        if torch.device(device).type == "mps":
-            data = apply_to_tensor(data, lambda x: x.float() if x.is_floating_point() else x)
-        data = convert_tensor(data, device=device)
+        data = apply_to_tensor(sample.data, _to_device)
 
         return Sample(data, sample.mAP, sample.length)
 
