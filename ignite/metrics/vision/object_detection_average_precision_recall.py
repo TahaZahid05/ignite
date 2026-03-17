@@ -7,7 +7,6 @@ from typing_extensions import Literal
 from ignite.metrics import MetricGroup
 from ignite.metrics.mean_average_precision import _BaseAveragePrecision, _cat_and_agg_tensors
 from ignite.metrics.metric import Metric, reinit__is_reduced, sync_all_reduce
-from ignite.utils import apply_to_tensor
 
 
 def coco_tensor_list_to_dict_list(
@@ -288,57 +287,56 @@ class ObjectDetectionAvgPrecisionRecall(Metric, _BaseAveragePrecision):
                                             This key is optional.
                 ========= ================= =================================================
         """
-
-        def _func(t):
-            if t.is_floating_point():
-                return t.to(device=self._device, dtype=self._fp_precision)
-            return t.to(device=self._device)
-
         self._check_matching_input(output)
-        y_pred, y_true = cast(
-            tuple[list[dict[str, torch.Tensor]], list[dict[str, torch.Tensor]]],
-            apply_to_tensor(output, _func),
-        )
 
+        y_pred, y_true = output
         for pred, target in zip(y_pred, y_true):
-            labels = target["labels"]
-            gt_boxes = target["bbox"]
+            labels = target["labels"].detach()
+            gt_boxes = target["bbox"].detach()
             gt_is_crowd = (
-                target["iscrowd"].bool() if "iscrowd" in target else torch.zeros_like(labels, dtype=torch.bool)
+                target["iscrowd"].detach().bool() if "iscrowd" in target else torch.zeros_like(labels, dtype=torch.bool)
             )
+
+            input_device = gt_boxes.device
             gt_ignore = ~self._match_area_range(gt_boxes) | gt_is_crowd
-            self._y_true_count += torch.bincount(labels[~gt_ignore], minlength=self._num_classes).to(
-                device=self._device
+            self._y_true_count += (
+                torch.bincount(labels[~gt_ignore], minlength=self._num_classes).detach().to(device=self._device)
             )
 
             # Matching logic of object detection mAP, according to COCO reference implementation.
             if len(pred["labels"]):
-                best_detections_index = torch.argsort(pred["scores"], stable=True, descending=True)
+                pred_labels_orig = pred["labels"].detach()
+                pred_scores_orig = pred["scores"].detach()
+                pred_bbox_orig = pred["bbox"].detach()
+
+                best_detections_index = torch.argsort(pred_scores_orig, stable=True, descending=True)
                 max_best_detections_index = torch.cat(
                     [
-                        best_detections_index[pred["labels"][best_detections_index] == c][
+                        best_detections_index[pred_labels_orig[best_detections_index] == c][
                             : self._max_detections_per_image_per_class
                         ]
                         for c in range(self._num_classes)
                     ]
                 )
-                pred_boxes = pred["bbox"][max_best_detections_index]
-                pred_labels = pred["labels"][max_best_detections_index]
+                pred_boxes = pred_bbox_orig[max_best_detections_index]
+                pred_labels = pred_labels_orig[max_best_detections_index]
+                iou_thresholds = self._iou_thresholds.to(input_device)
+
                 if not len(labels):
                     tp = torch.zeros(
-                        (len(self._iou_thresholds), len(max_best_detections_index)),
+                        (len(iou_thresholds), len(max_best_detections_index)),
                         dtype=torch.uint8,
-                        device=self._device,
+                        device=input_device,
                     )
-                    self._tps.append(tp)
-                    self._fps.append(~tp & self._match_area_range(pred_boxes).to(self._device))
+                    self._tps.append(tp.to(self._device))
+                    self._fps.append((~tp & self._match_area_range(pred_boxes)).to(self._device))
                 else:
                     ious = self.box_iou(pred_boxes, gt_boxes, cast(torch.BoolTensor, gt_is_crowd))
                     category_no_match = labels.expand(len(pred_labels), -1) != pred_labels.view(-1, 1)
                     NO_MATCH = -3
                     ious[category_no_match] = NO_MATCH
-                    ious = ious.unsqueeze(-1).repeat((1, 1, len(self._iou_thresholds)))
-                    ious[ious < self._iou_thresholds] = NO_MATCH
+                    ious = ious.unsqueeze(-1).repeat((1, 1, len(iou_thresholds)))
+                    ious[ious < iou_thresholds] = NO_MATCH
                     IGNORANCE = -2
                     ious[:, gt_ignore] += IGNORANCE
                     for i in range(len(pred_labels)):
@@ -346,7 +344,7 @@ class ObjectDetectionAvgPrecisionRecall(Metric, _BaseAveragePrecision):
                         # as torch.max selects the first one.
                         match_gts = ious[i].flip(0).max(0)
                         match_gts_indices = ious.size(1) - 1 - match_gts.indices
-                        for t in range(len(self._iou_thresholds)):
+                        for t in range(len(iou_thresholds)):
                             if match_gts.values[t] > NO_MATCH and not gt_is_crowd[match_gts_indices[t]]:
                                 ious[:, match_gts_indices[t], t] = NO_MATCH
                                 ious[i, match_gts_indices[t], t] = match_gts.values[t]
@@ -359,7 +357,7 @@ class ObjectDetectionAvgPrecisionRecall(Metric, _BaseAveragePrecision):
                         )
                     )
 
-                scores = pred["scores"][max_best_detections_index]
+                scores = pred_scores_orig[max_best_detections_index]
                 self._scores.append(scores.to(self._device, dtype=self._fp_precision))
                 self._y_pred_labels.append(pred_labels.to(dtype=torch.int, device=self._device))
 
